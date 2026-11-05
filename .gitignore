@@ -1,0 +1,4 @@
+# clasp local config (may contain project IDs / credentials)
+.clasp.json
+.clasprc.json
+node_modules/
