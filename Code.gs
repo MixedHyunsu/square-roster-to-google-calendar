@@ -224,8 +224,8 @@ function doGet(e) {
   }
 
   const cfg = getConfig_({ requireConnection: false });
-  const state = Utilities.getUuid();
-  props.setProperties({ OAUTH_STATE: state, OAUTH_STATE_CREATED: String(Date.now()) });
+  const state = makeState_(setupKey);
+  console.log('Approval page opened.');
 
   const authUrl = cfg.baseUrl + '/oauth2/authorize?' + toQuery_({
     client_id: cfg.appId,
@@ -248,17 +248,17 @@ function doGet(e) {
 
 function handleOAuthCallback_(params) {
   if (params.error) {
+    console.warn('OAuth callback: Square returned error: %s %s', params.error, params.error_description || '');
     return page_('Not connected',
       '<p>Square returned: ' + escapeHtml_(params.error_description || params.error) + '</p>');
   }
   const props = PropertiesService.getScriptProperties();
-  const expected = props.getProperty('OAUTH_STATE');
-  const createdAt = Number(props.getProperty('OAUTH_STATE_CREATED') || 0);
-  if (!expected || params.state !== expected || Date.now() - createdAt > OAUTH_STATE_TTL_MS) {
-    return page_('Link expired', '<p>This approval link is invalid or expired. Ask for a new one.</p>');
+  const stateCheck = verifyState_(params.state, props.getProperty('SETUP_KEY'));
+  if (stateCheck !== 'ok') {
+    console.warn('OAuth callback rejected: state %s', stateCheck);
+    return page_('Link expired',
+      '<p>This approval link is invalid or expired. Please reopen the link you were sent and try again.</p>');
   }
-  props.deleteProperty('OAUTH_STATE');
-  props.deleteProperty('OAUTH_STATE_CREATED');
 
   const cfg = getConfig_({ requireConnection: false });
   try {
@@ -270,10 +270,35 @@ function handleOAuthCallback_(params) {
     saveToken_(token);
     props.deleteProperty('MY_TEAM_MEMBER_ID'); // re-resolve against the new account
   } catch (err) {
-    console.error(err);
+    console.error('OAuth callback: token exchange failed: ' + (err.message || err));
     return page_('Something went wrong', '<p>' + escapeHtml_(String(err.message || err)) + '</p>');
   }
+  console.log('OAuth callback: Square connected and tokens saved.');
   return page_('Connected', '<p>Done. Square is connected. You can close this page.</p>');
+}
+
+/**
+ * Stateless OAuth state: "<timestamp>.<HMAC(timestamp, SETUP_KEY)>".
+ * Nothing is stored, so reopening the approval page never invalidates an
+ * earlier one, and retries after a Square error still work.
+ */
+function makeState_(setupKey) {
+  const ts = String(Date.now());
+  return ts + '.' + signState_(ts, setupKey);
+}
+
+function verifyState_(state, setupKey) {
+  if (!setupKey) return 'no-setup-key';
+  const parts = String(state || '').split('.');
+  if (parts.length !== 2) return 'malformed';
+  if (signState_(parts[0], setupKey) !== parts[1]) return 'bad-signature';
+  const age = Date.now() - Number(parts[0]);
+  if (!(age >= 0 && age <= OAUTH_STATE_TTL_MS)) return 'expired';
+  return 'ok';
+}
+
+function signState_(value, key) {
+  return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(value, key)).replace(/=+$/, '');
 }
 
 // ---------------------------------------------------------------------------
